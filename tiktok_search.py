@@ -16,6 +16,7 @@ import re
 import httpx
 
 from models import Video
+from link_resolver import LinkResolver
 from validators import canonical_tiktok_url
 from video_analyzer import analyze_video, extract_hashtags
 
@@ -30,9 +31,23 @@ class SearchService:
         self.db = db
         self._owns_client = client is None
         self.client = client or httpx.Client(timeout=config.timeout, follow_redirects=False)
+        self.resolver = LinkResolver(self.client, timeout=config.timeout)
+
+    def resolve_url(self, url: str) -> tuple[str, str]:
+        """Normalize direct links locally; resolve supported short links safely."""
+        if self.config.dry_run:
+            # Demo data must never cause even a harmless real metadata request.
+            try:
+                return canonical_tiktok_url(url)
+            except ValueError:
+                raise ValueError("В демонстрационном режиме короткие ссылки не открываются; используйте полный адрес видео") from None
+        # Settings apply immediately; the resolver shares this service's HTTP
+        # client but must not retain a timeout from the first launch forever.
+        self.resolver.timeout = float(self.config.timeout)
+        return self.resolver.resolve(url)
 
     def add_url(self, url: str, **metadata) -> Video:
-        canonical, video_id = canonical_tiktok_url(url.strip())
+        canonical, video_id = self.resolve_url(url)
         if metadata.get("video_id") and str(metadata["video_id"]) != video_id:
             raise ValueError("ID в метаданных не совпадает с URL")
         description = str(metadata.get("description") or "")
@@ -72,7 +87,7 @@ class SearchService:
                     record = {"url": record}
                 if not isinstance(record, dict) or not record.get("url"):
                     raise ValueError("В строке нет URL")
-                canonical, video_id = canonical_tiktok_url(str(record["url"]).strip())
+                canonical, video_id = self.resolve_url(str(record["url"]).strip())
                 if self.db.get_video(video_id):
                     counts["duplicate"] += 1
                     continue
@@ -140,7 +155,7 @@ class SearchService:
         if self.config.dry_run:
             raise DiscoveryError("В dry-run сетевое получение метаданных отключено")
         try:
-            response = self.client.get("https://www.tiktok.com/oembed", params={"url": canonical}, timeout=self.config.timeout)
+            response = self.client.get("https://www.tiktok.com/oembed", params={"url": canonical}, timeout=self.config.timeout, follow_redirects=False)
             if response.status_code == 429:
                 raise DiscoveryError("TikTok ограничил частоту запросов; получение метаданных остановлено")
             response.raise_for_status()

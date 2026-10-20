@@ -12,10 +12,10 @@ class SettingsWindow(QDialog):
         super().__init__(parent)
         self.service = service
         self.fields = {}
-        self.setWindowTitle("Настройки RubUP")
+        self.setWindowTitle("Расширенные настройки RubUP")
         self.resize(700, 720)
         root = QVBoxLayout(self)
-        notice = QLabel("Ключи API храните в .env. Секреты в этом окне не отображаются и не сохраняются.")
+        notice = QLabel("Подключения и ключи меняются в обычных настройках. Здесь доступны дополнительные правила, ограничения и ручные тарифы.")
         notice.setWordWrap(True)
         notice.setObjectName("muted")
         root.addWidget(notice)
@@ -58,7 +58,7 @@ class SettingsWindow(QDialog):
         self._text(ai, "reward_by_image", "Вознаграждение по картинкам (1:0.5,2:1)")
         system = self._page(tabs, "Система")
         self._text(system, "db_path", "Путь SQLite")
-        self._combo(system, "log_level", "Уровень локальных логов", [(x, x) for x in ("DEBUG", "INFO", "WARNING", "ERROR")])
+        self._combo(system, "log_level", "Подробность локального журнала", [("Подробно", "DEBUG"), ("Обычные события", "INFO"), ("Предупреждения", "WARNING"), ("Только ошибки", "ERROR")])
         self._integer(system, "retries", "Максимум повторов временных ошибок API", 0, 5)
         self._decimal(system, "timeout", "Тайм-аут API, секунд", 1, 120)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
@@ -158,7 +158,7 @@ class SettingsWindow(QDialog):
         try:
             config = replace(self.service.config, **self.values())
             config._base_dir = self.service.config.base_dir
-            self.service.save_settings(config)
+            self.save_result = self.service.save_settings(config)
         except Exception as exc:
             QMessageBox.warning(self, "Настройки не сохранены", str(exc))
             return

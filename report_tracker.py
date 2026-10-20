@@ -25,13 +25,15 @@ class ReportTracker:
         task = self.db.get_task(task_id)
         if task.get("is_test"):
             raise ValueError("Тестовые данные не подтверждают реальную публикацию")
+        if task.get('checklist', {}).get('preliminary'):
+            raise ValueError('Сначала проверьте дату и требования предварительного комментария')
         if task["publication_status"] == "PUBLISHED":
             raise ValueError("Публикация уже подтверждена для этого аккаунта и видео")
         if task["processing_status"] not in {"DRAFT_READY", "PENDING_APPROVAL"}:
             raise ValueError("Сначала подготовьте и проверьте комментарий")
         if not isinstance(checklist,dict):
             raise ValueError("Требуется явное подтверждение чек-листа")
-        protected = {"require_image", "require_like", "required_image_slot", "image_sha256"}
+        protected = {"require_image", "require_like", "required_image_slot", "image_sha256", "preliminary"}
         if protected.intersection(checklist):
             raise ValueError("Требования задания нельзя менять через подтверждение публикации")
         checks = {**task["checklist"], **checklist}

@@ -3,12 +3,12 @@ from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QSortFilterProx
 from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QTableView
 
 LABELS = {
-    "NEW": "Найдено", "ANALYZED": "Проверено", "DRAFT_READY": "Черновик готов",
-    "PENDING_APPROVAL": "Ручное действие", "PUBLISHED": "Подтверждено",
+    "NEW": "Найдено", "ANALYZED": "Проверяется", "DRAFT_READY": "Комментарий готов",
+    "PENDING_APPROVAL": "Ожидает публикации", "PUBLISHED": "Опубликовано",
     "FAILED": "Ошибка", "SKIPPED": "Пропущено", "UNCONFIRMED": "Не подтверждено",
-    "NOT_SENT": "Не отправлено", "SENT": "Отправлено", "UNKNOWN": "Неизвестно",
+    "NOT_SENT": "Не отправлено", "SENT": "Ссылка отправлена", "UNKNOWN": "Неизвестно",
     "NONE": "Нет", "REPORT_SUBMITTED": "Отчёт подан", "REPORT_ACCEPTED": "Отчёт принят",
-    "REWARD_CONFIRMED": "Начисление подтверждено",
+    "REWARD_CONFIRMED": "Задание завершено",
 }
 
 

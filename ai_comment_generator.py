@@ -227,5 +227,26 @@ class CommentGenerator:
             raise IntegrationError("Выбранная модель недоступна этому ключу OpenAI")
         return True
 
+    def available_models(self) -> list[str]:
+        """Return only text-model identifiers actually returned for this key.
+
+        The API model list proves visibility, not a particular quota or final
+        generation entitlement; the first generation may still be rejected.
+        No model names or tariffs are invented as fallback options.
+        """
+        if not self.api_key:
+            raise IntegrationError('Добавьте ключ OpenAI в настройках приложения')
+        data = self.http.request('GET', 'https://api.openai.com/v1/models', retry_safe=True,
+                                 headers={'Authorization': f'Bearer {self.api_key}'})
+        rows = data.get('data')
+        if not isinstance(rows, list):
+            raise IntegrationError('OpenAI вернул неожиданный список моделей')
+        def suitable(name):
+            return (name.startswith(('gpt-4.1', 'gpt-4o', 'gpt-5', 'o1', 'o3', 'o4'))
+                    and not name.startswith(('o1-preview', 'o1-mini'))
+                    and not any(part in name for part in ('image', 'audio', 'realtime', 'instruct', 'transcribe', 'tts', 'search')))
+        return sorted({row['id'] for row in rows if isinstance(row, dict)
+                       and isinstance(row.get('id'), str) and suitable(row['id'])})
+
     def close(self) -> None:
         self.http.close()

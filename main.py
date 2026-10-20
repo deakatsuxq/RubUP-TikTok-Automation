@@ -1,8 +1,28 @@
 """Windows desktop entry point and headless maintenance commands."""
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
+
+
+def show_startup_error(message, gui=False):
+    if gui:
+        try:
+            from PySide6.QtWidgets import QApplication, QMessageBox
+            app = QApplication.instance() or QApplication([])
+            QMessageBox.critical(None, 'RubUP Automation — не удалось запустить', message)
+            return
+        except Exception:
+            if os.name == 'nt':
+                try:
+                    import ctypes
+                    ctypes.windll.user32.MessageBoxW(None, message, 'RubUP Automation', 0x10)
+                    return
+                except Exception:
+                    pass
+    if sys.stderr is not None:
+        print('Ошибка: ' + message, file=sys.stderr)
 
 
 def main(argv=None):
@@ -17,11 +37,13 @@ def main(argv=None):
     group.add_argument('--export', metavar='PATH', help='Экспорт истории CSV')
     group.add_argument('--gui-smoke', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
-    from application import AppService
-    from logger import configure_logging
-    log = configure_logging(Path(args.config).resolve().parent / 'logs')
+    gui = not any((args.dry_run, args.import_file, args.prepare, args.status, args.export, args.gui_smoke))
     service = None
+    log = None
     try:
+        from application import AppService
+        from logger import configure_logging
+        log = configure_logging(Path(args.config).resolve().parent / 'logs')
         service = AppService(args.config, dry_run_override=True if args.dry_run else None)
         if args.dry_run:
             result = service.dry_run()
@@ -40,7 +62,7 @@ def main(argv=None):
             from PySide6.QtCore import QTimer
             from gui.main_window import MainWindow
             app = QApplication(sys.argv[:1])
-            app.setApplicationName('RubUP TikTok Automation')
+            app.setApplicationName('RubUP Automation')
             window = MainWindow(service)
             window.show()
             if args.gui_smoke:
@@ -49,11 +71,13 @@ def main(argv=None):
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 1 if result.get('failed', 0) else 0
     except Exception as exc:
-        from validators import ValidationError
-        from api_client import IntegrationError
-        detail = str(exc) if isinstance(exc, (ValidationError, IntegrationError, ValueError)) else type(exc).__name__
-        log.error('Операция завершилась ошибкой: %s', detail)
-        print(f'Ошибка: {detail}', file=sys.stderr)
+        if isinstance(exc, ImportError):
+            detail = 'Не найдены компоненты программы. Выполните установку двойным нажатием install.bat.'
+        else:
+            detail = str(exc) if isinstance(exc, ValueError) or type(exc).__name__ == 'IntegrationError' else type(exc).__name__
+        if log:
+            log.error('Операция завершилась ошибкой: %s', detail)
+        show_startup_error(detail + '\nПроверьте доступ к папке программы и её установку.', gui=gui)
         return 1
     finally:
         if service:

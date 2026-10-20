@@ -1,11 +1,10 @@
 """Shared application operations for CLI and Qt. Importing does not perform IO."""
 from dataclasses import replace
+from functools import wraps
 from pathlib import Path
 import re
 import threading
 import time
-
-from dotenv import load_dotenv
 
 from ai_comment_generator import CommentGenerator
 from comment_publisher import CommentPublisher
@@ -20,13 +19,33 @@ from telegram_bot import TelegramBot
 from tiktok_search import SearchService
 from validators import ValidationError
 from video_analyzer import analyze_video
+from task_review import review_task
+from credentials import CredentialStore
+from user_state import UserState
+from settings_service import SettingsService
+
+
+def _serialized(operation):
+    """Do not let settings close clients or change evidence during an operation."""
+    @wraps(operation)
+    def guarded(self, *args, **kwargs):
+        self._begin_cycle()
+        try:
+            return operation(self, *args, **kwargs)
+        finally:
+            self._end_cycle()
+    return guarded
 
 
 class AppService:
     def __init__(self, config_path='config.yaml', dry_run_override=None, *, config=None):
         self.config_path = Path(config_path).resolve()
         self.root = self.config_path.parent
-        load_dotenv(self.root / '.env', override=False)
+        if config is None and not self.config_path.exists():
+            from config import Config
+            config = Config(db_path=str(self.root / 'data/history.sqlite3'))
+            config._base_dir = self.root
+            save_config(config, self.config_path)
         self.config = config or load_config(self.config_path)
         if dry_run_override is not None:
             self.config = replace(self.config, dry_run=dry_run_override)
@@ -39,15 +58,20 @@ class AppService:
         self.images = ImageManager(
             self.root / ('data/dry_run_images' if self.config.dry_run else 'images'), self.db,
         )
+        self.credential_store = CredentialStore(self.root)
+        self.user_state = UserState(self.root / 'data/ui_state.json')
         self.search = SearchService(self.config, self.db)
-        self.generator = CommentGenerator(self.config, self.db)
-        self.telegram = TelegramBot(self.config, self.db)
+        self.generator = CommentGenerator(self.config, self.db, api_key=self.credential_store.get('OPENAI_API_KEY'))
+        self.telegram = TelegramBot(self.config, self.db,
+                                    token=self.credential_store.get('TELEGRAM_BOT_TOKEN'),
+                                    chat_id=self.credential_store.get('TELEGRAM_CHAT_ID'))
         self.publisher = CommentPublisher(self.config, self.db, self.images)
         self.report_tracker = ReportTracker(self.db)
         self.cost_tracker = CostTracker(self.db, self.config)
         self.costs = self.cost_tracker
         self._cycle_lock = threading.Lock()
         self._process_lock = ProcessLock(str(db_path) + '.worker.lock')
+        self.settings = SettingsService(self)
 
     def _begin_cycle(self):
         if not self._cycle_lock.acquire(blocking=False):
@@ -71,11 +95,82 @@ class AppService:
     def stats(self):
         return self.db.stats()
 
+    def task_view(self, task_or_id):
+        task = dict(task_or_id) if isinstance(task_or_id, dict) else self.db.get_task(task_or_id)
+        return {**task, 'review': review_task(task, self.config)}
+
+    def onboarding_complete(self):
+        return bool(self.user_state.get('onboarding_complete', False))
+
+    def complete_onboarding(self):
+        self.user_state.set('onboarding_complete', True)
+
+    def reset_onboarding(self):
+        self.user_state.set('onboarding_complete', False)
+
+    def process_url(self, url, stop_event=None, progress=None):
+        """Prepare one known link, preserving cached drafts and pending evidence."""
+        self._begin_cycle()
+        task = None
+        warning = ''
+
+        def checkpoint(message):
+            if stop_event and stop_event.is_set():
+                return False
+            if progress:
+                progress(message)
+            return not (stop_event and stop_event.is_set())
+
+        def cancelled():
+            if task:
+                return {**self.task_view(task['id']), 'cancelled': True, 'warning': warning}
+            return {'cancelled': True}
+
+        try:
+            if not checkpoint('Проверяем ссылку…'):
+                return cancelled()
+            canonical, video_id = self.search.resolve_url(url)
+            existing = self.db.get_video(video_id)
+            if not existing:
+                self.search.add_url(canonical)
+            task = self.db.ensure_task(self.config.account_id, video_id)
+            if task['publication_status'] == 'PUBLISHED':
+                return {**self.task_view(task), 'cached': True}
+            if task.get('is_test') and not self.config.dry_run:
+                raise ValidationError('Тестовые данные доступны только в демонстрационном режиме')
+            # Cached preparation is a result, never a reason for another paid call.
+            if task.get('comment'):
+                return {**self.task_view(task), 'cached': True}
+            if not checkpoint('Получаем доступные сведения…'):
+                return cancelled()
+            if not task.get('description') and not self.config.dry_run:
+                from tiktok_search import DiscoveryError
+                try:
+                    self.search.enrich(video_id)
+                except DiscoveryError:
+                    warning = 'Не удалось получить сведения из TikTok. Недостающие данные можно проверить вручную.'
+                    self.db.add_event(task['id'], 'METADATA_UNAVAILABLE', warning)
+            task = self.db.get_task(task['id'])
+            review = review_task(task, self.config)
+            if not review['eligible'] and not review['preliminary_allowed']:
+                self.db.update_task(task['id'], processing_status='SKIPPED', error=review['reason'])
+                raise ValidationError(review['reason'])
+            if not checkpoint('Готовим комментарий…'):
+                return cancelled()
+            result = self._prepare_one(task['id'], allow_preliminary=True)
+            if not checkpoint('Проверяем результат…'):
+                return cancelled()
+            return {**self.task_view(result), 'warning': warning, 'cached': False}
+        finally:
+            self._end_cycle()
+
+    @_serialized
     def import_urls(self, text):
         result = self.search.import_urls(text)
         self.refresh()
         return result
 
+    @_serialized
     def import_file(self, path):
         result = self.search.import_file(path)
         self.refresh()
@@ -100,15 +195,15 @@ class AppService:
             count += 1
         return {'found': len(found), 'queued': count, 'source': 'local_import'}
 
-    def prepare_one(self, task_id, regenerate=False):
+    def prepare_one(self, task_id, regenerate=False, allow_preliminary=False):
         # Also protects GUI/editor versus a concurrent scheduler cycle.
         self._begin_cycle()
         try:
-            return self._prepare_one(task_id, regenerate)
+            return self._prepare_one(task_id, regenerate, allow_preliminary=allow_preliminary)
         finally:
             self._end_cycle()
 
-    def _prepare_one(self, task_id, regenerate=False):
+    def _prepare_one(self, task_id, regenerate=False, allow_preliminary=False):
         task = self.db.get_task(task_id)
         if not task:
             raise ValidationError('Задача не найдена')
@@ -116,17 +211,19 @@ class AppService:
             raise ValidationError('Задача принадлежит другому аккаунту')
         if task['publication_status'] == 'PUBLISHED':
             raise ValidationError('Публикация уже подтверждена')
-        analysis = analyze_video(self.db.get_video(task['video_id']), self.config)
-        if not analysis['eligible']:
+        if task.get('is_test') and not self.config.dry_run:
+            raise ValidationError('Тестовые задания не используют платную генерацию')
+        analysis = review_task(task, self.config)
+        if not analysis['eligible'] and not (allow_preliminary and analysis['preliminary_allowed']):
             raise ValidationError(analysis['reason'])
         if task.get('comment') and not regenerate:
-            return self.publisher.prepare(task_id, task['comment'])
+            return self.publisher.prepare(task_id, task['comment'], allow_preliminary=allow_preliminary)
         self.db.update_task(task_id, attempts=task.get('attempts', 0) + 1)
         try:
             self.publisher.prepare_requirements(task_id)
             context = {**self.db.get_task(task_id), 'category': analysis['category']}
             comment = self.generator.generate(task_id, context)
-            return self.publisher.prepare(task_id, comment)
+            return self.publisher.prepare(task_id, comment, allow_preliminary=allow_preliminary)
         except Exception as exc:
             # Integrations expose sanitized messages; unknown exceptions only expose type.
             from api_client import IntegrationError
@@ -173,13 +270,14 @@ class AppService:
         finally:
             self._end_cycle()
 
-    def save_comment(self, task_id, text):
+    def save_comment(self, task_id, text, allow_preliminary=False):
         self._begin_cycle()
         try:
-            return self.publisher.prepare(task_id, text)
+            return self.publisher.prepare(task_id, text, allow_preliminary=allow_preliminary)
         finally:
             self._end_cycle()
 
+    @_serialized
     def set_task_requirements(self, task_id, require_image, required_image_slot=None, require_like=False):
         task = self.db.get_task(task_id)
         if task['account_id'] != self.config.account_id:
@@ -205,9 +303,10 @@ class AppService:
                             processing_status='ANALYZED', expected_reward=0,
                             error='Требования изменены: повторно проверьте сохранённый черновик')
         if task['comment']:
-            return self.publisher.prepare(task_id, task['comment'])
+            return self.publisher.prepare(task_id, task['comment'], allow_preliminary=True)
         return self.db.get_task(task_id)
 
+    @_serialized
     def enrich_metadata(self, task_id):
         task = self.db.get_task(task_id)
         if task['account_id'] != self.config.account_id or task['publication_status'] == 'PUBLISHED':
@@ -216,6 +315,7 @@ class AppService:
         self.refresh()
         return self.db.get_task(task_id)
 
+    @_serialized
     def confirm_publication(self, task_id, checklist):
         if self.config.dry_run:
             raise ValidationError('Dry-run не подтверждает реальные публикации')
@@ -231,6 +331,7 @@ class AppService:
                 raise ValidationError('Картинка заменена после подготовки: восстановите оригинал')
         return self.report_tracker.confirm_publication(task_id, checklist)
 
+    @_serialized
     def send_links(self):
         result = {'sent': 0, 'skipped': 0, 'failed': 0}
         if self.config.dry_run:
@@ -248,6 +349,41 @@ class AppService:
                 result['failed'] += 1
         return result
 
+    @_serialized
+    def send_task_link(self, task_id):
+        task = self.db.get_task(task_id)
+        if task['account_id'] != self.config.account_id or task.get('is_test') or self.config.dry_run:
+            raise ValidationError('Демонстрационные данные нельзя отправлять в Telegram')
+        if not review_task(task, self.config)['eligible']:
+            raise ValidationError('Перед отправкой проверьте дату и требования видео')
+        if self.config.telegram_mode == 'disabled':
+            raise ValidationError('Отправка ссылок выключена. Выберите режим в настройках Telegram.')
+        return self.telegram.send_video(task)
+
+    @_serialized
+    def send_test_link(self, url):
+        """Explicit user action, one real locally verified URL and the same outbox."""
+        from validators import canonical_tiktok_url
+        if self.config.dry_run:
+            raise ValidationError('В демонстрационном режиме сообщения не отправляются')
+        canonical, video_id = canonical_tiktok_url(url)
+        task = next((t for t in self.list_tasks() if t['video_id'] == video_id), None)
+        if not task or task.get('is_test') or not review_task(task, self.config)['eligible']:
+            raise ValidationError('Выберите настоящее видео из своих заданий с проверенной датой и тематикой')
+        if task['url'] != canonical:
+            raise ValidationError('Адрес должен совпадать с проверенным видео из ваших заданий')
+        config = replace(self.config, telegram_mode='verified')
+        test_bot = TelegramBot(config, self.db,
+                               token=self.credential_store.get('TELEGRAM_BOT_TOKEN'),
+                               chat_id=self.credential_store.get('TELEGRAM_CHAT_ID'))
+        try:
+            # Verified metadata is sufficient for this explicit test; no publication is inferred.
+            candidate = {**task, 'processing_status': 'ANALYZED'}
+            return test_bot.send_video(candidate)
+        finally:
+            test_bot.close()
+
+    @_serialized
     def update_metadata(self, task_id, published_at, description, author=''):
         task = self.db.get_task(task_id)
         if task['account_id'] != self.config.account_id:
@@ -262,32 +398,35 @@ class AppService:
                              description=description, author=author, hashtags=tags)
         self.db.add_event(task_id, 'MANUAL_METADATA', 'Метаданные введены пользователем')
         # Explicitly revalidate this task even when it previously failed.
-        analysis = analyze_video(self.db.get_video(task['video_id']), self.config)
+        analysis = review_task(self.db.get_video(task['video_id']), self.config)
+        checks = {**task['checklist'], 'preliminary': not analysis['eligible']}
         if task.get('comment') and analysis['eligible']:
             status = 'PENDING_APPROVAL'
             detail = 'Метаданные изменены: проверьте или перегенерируйте сохранённый комментарий'
         else:
-            status = 'ANALYZED' if analysis['eligible'] else 'NEW'
+            status = ('DRAFT_READY' if task.get('comment') and analysis['preliminary_allowed']
+                      else 'ANALYZED' if analysis['eligible'] else 'NEW')
             detail = '' if analysis['eligible'] else analysis['reason']
-        self.db.update_task(task_id, processing_status=status, error=detail)
+        self.db.update_task(task_id, processing_status=status, error=detail, checklist=checks)
         return self.db.get_task(task_id)
 
     def export_csv(self, path):
         return self.report_tracker.export_csv(path)
 
     def save_settings(self, config):
-        # Reinitialization is explicit: changes apply after restarting, keeping worker state consistent.
-        save_config(config, self.config_path)
-        return {'restart_required': True}
+        return self.settings.apply(config=config)
 
     def test_openai(self):
-        return self.generator.test_connection()
+        return self.settings.test_openai()
 
     def test_telegram(self):
-        return self.telegram.test_connection()
+        return self.settings.test_telegram()
 
     def dry_run(self):
-        cfg = replace(self.config, dry_run=True, require_image=False, image_mode='none')
+        cfg = replace(self.config, dry_run=True, require_image=False, require_like=False, image_mode='none',
+                      hashtags=['cs2', 'telegram'], disabled_hashtags=[], keywords=[], min_date='2026-05-01',
+                      max_comment_length=max(100, self.config.max_comment_length), max_videos=2,
+                      advertising=True, disclosure='реклама')
         demo = AppService(self.config_path, config=cfg)
         try:
             fixtures = [
@@ -313,6 +452,18 @@ class AppService:
             }
         finally:
             demo.close()
+
+    def demo_result(self):
+        report = self.dry_run()
+        demo_db = Database(report['database'])
+        try:
+            candidates = [t for t in demo_db.list_tasks(self.config.account_id) if t.get('comment') and t.get('is_test')]
+            if not candidates:
+                raise ValidationError('Не удалось подготовить демонстрационный пример')
+            return {**self.task_view(candidates[0]), 'demo': True, 'demo_stats': report['stats'],
+                    'warning': 'Демонстрационный режим — реальные действия не выполняются'}
+        finally:
+            demo_db.close()
 
     def close(self):
         for obj in (self.search, self.generator, self.telegram):

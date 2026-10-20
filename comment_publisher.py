@@ -1,13 +1,14 @@
 """Manual preparation only. No TikTok write endpoint is called by this program."""
 from validators import ValidationError, canonical_tiktok_url, validate_comment
 from video_analyzer import analyze_video
+from task_review import review_task
 
 
 class CommentPublisher:
     def __init__(self, config, db, images):
         self.config, self.db, self.images = config, db, images
 
-    def validate_draft(self, task, comment):
+    def validate_draft(self, task, comment, allow_preliminary=False):
         if task['account_id'] != self.config.account_id:
             raise ValidationError('Задача принадлежит другому аккаунту')
         _, video_id = canonical_tiktok_url(task['url'])
@@ -15,8 +16,8 @@ class CommentPublisher:
             raise ValidationError('ID видео не соответствует ссылке')
         if task['publication_status'] == 'PUBLISHED':
             raise ValidationError('Публикация уже подтверждена для этого аккаунта и видео')
-        analysis = analyze_video(task, self.config)
-        if not analysis['eligible']:
+        analysis = review_task(task, self.config)
+        if not analysis['eligible'] and not (allow_preliminary and analysis['preliminary_allowed']):
             raise ValidationError(analysis['reason'])
         return validate_comment(
             comment, self.config.max_comment_length,
@@ -24,20 +25,25 @@ class CommentPublisher:
             advertising=self.config.advertising, disclosure=self.config.disclosure,
         )
 
-    def prepare(self, task_id, comment):
+    def prepare(self, task_id, comment, allow_preliminary=False):
         task = self.db.get_task(task_id)
         if not task:
             raise ValidationError('Задача не найдена')
-        text = self.validate_draft(task, comment)
+        text = self.validate_draft(task, comment, allow_preliminary=allow_preliminary)
         if self.db.comment_exists(text, exclude_task_id=task_id):
             raise ValidationError('Этот комментарий уже использован')
         task = self.prepare_requirements(task_id)
+        preliminary = not review_task(task, self.config)['eligible']
+        checks = {**task['checklist'], 'preliminary': preliminary}
         self.db.update_task(
-            task_id, comment=text, processing_status='PENDING_APPROVAL', error='',
+            task_id, comment=text, processing_status='DRAFT_READY' if preliminary else 'PENDING_APPROVAL',
+            error='', checklist=checks,
         )
         if task.get('image_slot'):
             self.images.record_usage(task['image_slot'], task_id)
-        self.db.add_event(task_id, 'DRAFT_READY', 'Подготовлен комментарий; требуется ручная публикация')
+        detail = ('Предварительный комментарий: дата или тематика ещё не проверены'
+                  if preliminary else 'Подготовлен комментарий; требуется ручная публикация')
+        self.db.add_event(task_id, 'DRAFT_READY', detail)
         return self.db.get_task(task_id)
 
     def prepare_requirements(self, task_id):

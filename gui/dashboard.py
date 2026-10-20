@@ -1,41 +1,48 @@
-"""Compact, honest application statistics."""
-from PySide6.QtWidgets import QFrame, QGridLayout, QLabel, QVBoxLayout, QWidget
+"""Three everyday indicators; detailed accounting belongs to the history page."""
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 
 class Dashboard(QWidget):
-    METRICS = (
-        ("videos", "Видео в базе"), ("processed", "Обработано задач"),
-        ("drafts", "Черновиков"), ("published", "Публикаций подтверждено"),
-        ("errors", "Ошибок"), ("telegram_sent", "Ссылок отправлено"),
-        ("total_cost", "Расходы OpenAI, $"), ("confirmed_reward", "Вознаграждение подтверждено"),
-    )
+    METRICS = (("processed", "Обработано видео"), ("drafts", "Готово комментариев"),
+               ("telegram_sent", "Отправлено ссылок"))
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        layout = QGridLayout(self)
+        layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
+        layout.setSpacing(14)
         self.labels = {}
-        for i, (key, title) in enumerate(self.METRICS):
+        for key, caption in self.METRICS:
             card = QFrame()
             card.setObjectName("metricCard")
             box = QVBoxLayout(card)
-            label = QLabel("—")
+            box.setContentsMargins(18, 14, 18, 14)
+            label = QLabel("0")
             label.setObjectName("metricValue")
-            caption = QLabel(title)
-            caption.setWordWrap(True)
-            caption.setObjectName("muted")
+            title = QLabel(caption)
+            title.setObjectName("muted")
             box.addWidget(label)
-            box.addWidget(caption)
-            layout.addWidget(card, i // 4, i % 4)
+            box.addWidget(title)
+            layout.addWidget(card, 1)
+            self.labels[key] = label
+        # Detailed confirmation counts are deliberately outside the home page.
+        self.details_widget = QWidget()
+        details = QHBoxLayout(self.details_widget)
+        details.setContentsMargins(0, 0, 0, 0)
+        for key, caption in (('published', 'Подтверждено публикаций'), ('errors', 'Ошибок обработки')):
+            card = QFrame()
+            card.setObjectName('metricCard')
+            box = QVBoxLayout(card)
+            label = QLabel('0')
+            label.setObjectName('metricValue')
+            box.addWidget(label)
+            title = QLabel(caption)
+            title.setObjectName('muted')
+            box.addWidget(title)
+            details.addWidget(card)
             self.labels[key] = label
 
     def set_stats(self, stats):
         for key, label in self.labels.items():
-            value = stats.get(key)
-            if value is None:
-                label.setText("не рассчитано" if key == "total_cost" else "0")
-            elif key in {"total_cost", "confirmed_reward"}:
-                label.setText(f"{value:,.4f}".rstrip("0").rstrip("."))
-            else:
-                label.setText(str(value))
+            label.setText(str(stats.get(key, 0) or 0))
+        self.setToolTip(f"Опубликовано с подтверждением пользователя: {stats.get('published', 0)}")
