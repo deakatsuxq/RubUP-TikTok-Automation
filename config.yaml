@@ -1,0 +1,61 @@
+# Секреты хранятся в .env, а не в этом файле.
+hashtags:
+  - upgrader
+  - cs2
+  - caser
+  - rubup
+  - кейсер
+  - апгрейдер
+  - тгподарки
+  - подаркитг
+  - нфт
+  - nft
+  - тг
+  - телеграм
+  - telegram
+  - меллстрой
+  - меллстройнарезки
+  - mellstroy
+  - мелстрой
+  - dota2
+  - twitch
+  - leva2k
+  - buster
+  - лева2к
+  - бустер
+  - твич
+  - gensyxa
+  - генсуха
+  - нарезка
+disabled_hashtags: []
+keywords: []
+min_date: '2026-05-01'
+model: gpt-4.1-mini
+max_videos: 50
+search_interval: 300
+target_per_minute: 6
+max_comment_length: 100
+categories: [RubUP, CS2, Dota 2, Скины, Кейсы, Игровые предметы, Подарки, NFT, Telegram-подарки, Стримы, Нарезки, Промокоды, Обмены]
+publication_mode: manual
+telegram_mode: disabled
+image_mode: none
+image_order: [1, 2, 3, 4]
+selected_image: 1
+db_path: data/history.sqlite3
+log_level: INFO
+retries: 2
+timeout: 20.0
+dry_run: false
+account_id: local-account
+# null — тариф неизвестен. Укажите тариф своей модели за миллион токенов (USD).
+input_price_per_million: null
+output_price_per_million: null
+third_party_cost: 0.0
+max_context_chars: 2000
+max_output_tokens: 128
+reward_default: 0.0
+reward_by_image: {}
+require_image: false
+require_like: false
+advertising: true
+disclosure: реклама
