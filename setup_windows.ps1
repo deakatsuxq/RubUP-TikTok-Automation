@@ -18,5 +18,8 @@ if ($LASTEXITCODE -ne 0) { throw "Не удалось установить за�
 & $python -m pip check
 if ($LASTEXITCODE -ne 0) { throw "Установленные зависимости несовместимы." }
 
+& $python -m playwright install chromium
+if ($LASTEXITCODE -ne 0) { throw "Не удалось установить Chromium для Playwright. Проверьте Интернет и повторите install.bat." }
+
 # Existing config.yaml, .env, database and user images are deliberately preserved.
 Write-Host "Установка завершена. Откройте start.bat двойным нажатием."

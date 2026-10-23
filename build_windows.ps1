@@ -12,15 +12,20 @@ if ($LASTEXITCODE -ne 0) { throw "Не удалось установить PyIns
 # --windowed avoids a separate console. --onedir keeps startup and troubleshooting simple.
 $docs = (Join-Path $PSScriptRoot "docs") + ";docs"
 # Never rebuild over an installed application that may contain user state.
-$releaseName = "RubUP-Automation-3.0-" + (Get-Date -Format "yyyyMMdd-HHmmss-fff")
+$version = (Get-Content -LiteralPath (Join-Path $PSScriptRoot "VERSION") -Raw).Trim()
+if ($version -notmatch "^[0-9]+\.[0-9]+(\.[0-9]+)?$") { throw "Неверная версия выпуска в VERSION." }
+$releaseName = "RubUP-Automation-$version-" + (Get-Date -Format "yyyyMMdd-HHmmss-fff")
 $releaseRoot = Join-Path (Join-Path $PSScriptRoot "dist") $releaseName
 if (Test-Path -LiteralPath $releaseRoot) { throw "Папка выпуска уже существует. Повторите сборку." }
-& $python -m PyInstaller --noconfirm --clean --windowed --onedir --name RubUP-Automation --distpath $releaseRoot --add-data $docs (Join-Path $PSScriptRoot "main.py")
+& $python -m PyInstaller --noconfirm --clean --windowed --onedir --collect-all playwright --name RubUP-Automation --distpath $releaseRoot --add-data $docs (Join-Path $PSScriptRoot "main.py")
 if ($LASTEXITCODE -ne 0) { throw "Сборка Windows не выполнена." }
 
 $output = Join-Path $releaseRoot "RubUP-Automation"
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot "config.yaml") -Destination (Join-Path $output "config.yaml")
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot "config.v4.example.yaml") -Destination (Join-Path $output "config.yaml")
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot ".env.example") -Destination (Join-Path $output ".env.example")
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "README.md") -Destination (Join-Path $output "README.md")
+foreach ($file in @("VERSION", "install_chromium.bat", "install_chromium.ps1")) {
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination (Join-Path $output $file)
+}
 Write-Host "Сборка создана: $output\RubUP-Automation.exe"
-Write-Host "Ключи, картинки и базы не копировались. Настройте их в приложении."
+Write-Host "Ключи, картинки, браузерные профили и базы не копировались. На целевом ПК сначала запустите install_chromium.bat."

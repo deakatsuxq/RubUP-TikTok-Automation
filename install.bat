@@ -2,7 +2,7 @@
 chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
-echo Установка RubUP Automation. Дождитесь завершения.
+echo Установка RubUP Automation 4.0 и Playwright Chromium. Дождитесь завершения.
 echo История, настройки, ключи и картинки сохранятся.
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup_windows.ps1"
 if errorlevel 1 (

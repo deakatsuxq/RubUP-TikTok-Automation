@@ -15,7 +15,7 @@ class IntegrationError(RuntimeError):
 class APIClient:
     """Small JSON HTTP adapter; mutation retries require explicit opt-in.
 
-    OpenAI generation can be billed even if a response is lost. Transport
+    A remote mutation may succeed even if a response is lost. Transport
     failures are therefore never retried for mutations. Explicit rate-limit
     rejection may be retried because the operation was not accepted.
     """

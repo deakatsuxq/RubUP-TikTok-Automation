@@ -1,4 +1,4 @@
-"""Windows desktop entry point and headless maintenance commands."""
+"""RubUP 4.0 entry point: a user comment bank and manual Playwright workflow."""
 import argparse
 import json
 import os
@@ -27,47 +27,55 @@ def show_startup_error(message, gui=False):
 
 def main(argv=None):
     root = Path(sys.executable).resolve().parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent
-    parser = argparse.ArgumentParser(description='RubUP — подготовка заданий TikTok')
+    parser = argparse.ArgumentParser(description='RubUP 4.0 — ваши комментарии и Playwright')
     parser.add_argument('--config', default=str(root / 'config.yaml'))
+    parser.add_argument('--test-mode', action='store_true', help='Изолированная тестовая очередь без внешних действий')
     group = parser.add_mutually_exclusive_group()
-    group.add_argument('--dry-run', action='store_true', help='Изолированная проверка без сети и ключей')
-    group.add_argument('--batch-demo', action='store_true', help='Демонстрация 50 видео и 100 черновиков без сети')
-    group.add_argument('--import-file', metavar='PATH', help='Импорт TXT, CSV или JSON')
-    group.add_argument('--prepare', action='store_true', help='Подготовка одного цикла; реальные API могут тарифицироваться')
+    group.add_argument('--dry-run', action='store_true', help='Проверка 50 видео / 100 комментариев без сети')
+    group.add_argument('--batch-demo', action='store_true', help='Демонстрация 50 видео / 100 комментариев без сети')
+    group.add_argument('--import-file', metavar='PATH', help='Импорт TikTok-ссылок из TXT')
+    group.add_argument('--import-comments', metavar='PATH', help='Импорт ваших комментариев из TXT')
+    group.add_argument('--prepare', action='store_true', help='Назначить комментарии из банка; без публикаций')
     group.add_argument('--status', action='store_true', help='Локальная статистика')
     group.add_argument('--export', metavar='PATH', help='Экспорт истории CSV')
     group.add_argument('--gui-smoke', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
-    gui = not any((args.dry_run, args.batch_demo, args.import_file, args.prepare, args.status, args.export, args.gui_smoke))
+    gui = not any((args.dry_run, args.batch_demo, args.import_file, args.import_comments,
+                   args.prepare, args.status, args.export, args.gui_smoke))
     service = None
     log = None
     try:
-        from application import AppService
+        from automation_service import AutomationService
         from logger import configure_logging
-        log = configure_logging(Path(args.config).resolve().parent / 'logs')
-        service = AppService(args.config, dry_run_override=True if args.dry_run or args.batch_demo else None)
-        if args.batch_demo:
-            report = service.batch.demo()
-            result = {k: v for k, v in report.items() if k != 'groups'}
-        elif args.dry_run:
-            result = service.dry_run()
+        # Isolated demonstrations do not write logs or queues into the user's
+        # working directory. The service chooses a fresh temporary root.
+        service = AutomationService(args.config, test_mode=args.test_mode or args.dry_run or args.batch_demo)
+        log = configure_logging(service.root / 'logs')
+        if args.batch_demo or args.dry_run:
+            result = service.demo()
         elif args.import_file:
-            result = service.import_file(args.import_file)
+            result = service.import_links(Path(args.import_file).read_text(encoding='utf-8-sig'))
+        elif args.import_comments:
+            result = service.bank.import_text(Path(args.import_comments).read_text(encoding='utf-8-sig'))
         elif args.prepare:
-            service.refresh()
-            result = service.prepare_pending()
+            result = service.prepare()
         elif args.status:
             result = service.stats()
         elif args.export:
-            service.export_csv(args.export)
+            import csv
+            rows = service.tasks()
+            with Path(args.export).open('w', encoding='utf-8-sig', newline='') as output:
+                writer = csv.DictWriter(output, fieldnames=['id', 'slot', 'video_id', 'url', 'comment', 'status', 'published', 'liked'], extrasaction='ignore')
+                writer.writeheader()
+                writer.writerows(rows)
             result = {'export': str(Path(args.export).resolve())}
         else:
             from PySide6.QtWidgets import QApplication
             from PySide6.QtCore import QTimer
-            from gui.batch_window import BatchWindow
+            from gui.automation_window import AutomationWindow
             app = QApplication(sys.argv[:1])
-            app.setApplicationName('RubUP Automation 3.0')
-            window = BatchWindow(service)
+            app.setApplicationName('RubUP Automation 4.0')
+            window = AutomationWindow(service)
             window.show()
             if args.gui_smoke:
                 QTimer.singleShot(500, window.close)
