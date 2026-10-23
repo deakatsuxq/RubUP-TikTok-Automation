@@ -142,6 +142,7 @@ class SettingsPanel(QWidget):
         self.service = service
         self.last_save_result = {}
         self._available_models = []
+        self._demo_mode = False
         self.jobs = JobRunner(self)
         self.jobs.idle.connect(self.idle)
         self.jobs.busy_changed.connect(self._set_busy)
@@ -215,6 +216,11 @@ class SettingsPanel(QWidget):
         self.model_combo.setObjectName('modelChoice')
         self.model_combo.setToolTip('Список обновляется реальным запросом к OpenAI. Наличие модели в списке не гарантирует доступность каждого её метода.')
         form.addRow(explained_label('Модель', 'Выберите текстовую модель, доступную вашему ключу. Дешевизна зависит от действующего тарифа.'), self.model_combo)
+        self.batch_budget = QLineEdit()
+        self.batch_budget.setObjectName('batchBudget')
+        self.batch_budget.setPlaceholderText('Без лимита — оставьте пустым')
+        form.addRow(explained_label('Лимит партии, долл.',
+            'Лимит закрепляется при создании новой очереди и сохраняется после перезапуска. Настройка не повышает лимит уже созданной партии. Для ограничения нужны тарифы модели; неизвестный результат останавливает новые запросы.'), self.batch_budget)
         layout.addLayout(form)
         buttons = QHBoxLayout()
         self.check_ai = self._button('Проверить и получить модели', self.check_openai)
@@ -254,6 +260,14 @@ class SettingsPanel(QWidget):
                            ('После подготовки комментария', 'draft'), ('После моей публикации', 'published')]:
             self.telegram_mode.addItem(text, mode)
         form.addRow(explained_label('Когда можно отправить', 'Выбранный этап ограничивает отправку. Сообщение отправляется только вашим явным действием.'), self.telegram_mode)
+        self.batch_telegram_mode = QComboBox()
+        for text, mode in [('После выполнения обоими аккаунтами', 'both'),
+                           ('После выполнения одним аккаунтом', 'any'),
+                           ('После подготовки обоих комментариев', 'draft'),
+                           ('После проверки видео', 'verified'), ('Не отправлять автоматически', 'disabled')]:
+            self.batch_telegram_mode.addItem(text, mode)
+        form.addRow(explained_label('Пакетная обработка 3.0',
+            'После ручных подтверждений ссылка автоматически попадает в очередь Telegram. По умолчанию нужны публикации и обязательные лайки обоих аккаунтов. Один адрес отправляется один раз.'), self.batch_telegram_mode)
         layout.addLayout(form)
         buttons = QHBoxLayout()
         self.check_bot = self._button('Проверить бота', self.check_telegram)
@@ -308,8 +322,14 @@ class SettingsPanel(QWidget):
     def _set_busy(self, busy):
         for button in self._buttons:
             button.setEnabled(not busy)
-        for field in (self.openai_key, self.telegram_token, self.chat_id, self.model_combo, self.telegram_mode):
+        for field in (self.openai_key, self.telegram_token, self.chat_id, self.model_combo, self.telegram_mode,
+                      self.batch_budget, self.batch_telegram_mode):
             field.setEnabled(not busy)
+        self.send_test.setEnabled(not busy and not self._demo_mode)
+
+    def set_demo_mode(self, active):
+        self._demo_mode = bool(active)
+        self.send_test.setEnabled(not self.busy and not self._demo_mode)
 
     def _error(self, exc):
         message = friendly_error(exc, self._credentials().values())
@@ -343,6 +363,10 @@ class SettingsPanel(QWidget):
                 self.model_combo.setCurrentIndex(index)
         index = self.telegram_mode.findData(self.service.config.telegram_mode)
         self.telegram_mode.setCurrentIndex(max(0, index))
+        index = self.batch_telegram_mode.findData(self.service.config.batch_telegram_mode)
+        self.batch_telegram_mode.setCurrentIndex(max(0, index))
+        limit = self.service.config.batch_budget_usd
+        self.batch_budget.setText('' if limit is None else str(limit))
         status = self.service.settings.status()
         secure = status.get('secure_storage', '')
         protected = 'Windows' in str(secure) or 'DPAPI' in str(secure).upper()
@@ -406,7 +430,13 @@ class SettingsPanel(QWidget):
             selected = self.model_combo.currentData()
             if not selected:
                 raise ValueError('Выберите доступную модель или оставьте текущую настройку.')
-            changes = {'model': selected, 'telegram_mode': self.telegram_mode.currentData()}
+            limit_text = self.batch_budget.text().strip().replace(',', '.')
+            try:
+                limit = float(limit_text) if limit_text else None
+            except ValueError:
+                raise ValueError('Введите сумму лимита числом или оставьте поле пустым') from None
+            changes = {'model': selected, 'telegram_mode': self.telegram_mode.currentData(),
+                       'batch_telegram_mode': self.batch_telegram_mode.currentData(), 'batch_budget_usd': limit}
             if selected != self.service.config.model:
                 changes.update(input_price_per_million=None, output_price_per_million=None)
             config = replace(self.service.config, **changes)
@@ -421,6 +451,9 @@ class SettingsPanel(QWidget):
             return False
 
     def send_test_link(self):
+        if self._demo_mode:
+            self.telegram_status.setText('В демонстрационном режиме реальные сообщения не отправляются. Сначала вернитесь к рабочей очереди.')
+            return
         tasks = [task for task in self.service.list_tasks() if not task.get('is_test')]
         if not tasks:
             self.telegram_status.setText('Сначала обработайте и проверьте реальное видео. Тестовая отправка не использует вымышленные ссылки.')

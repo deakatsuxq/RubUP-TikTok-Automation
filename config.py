@@ -49,6 +49,8 @@ class Config:
     require_like: bool = False
     advertising: bool = True
     disclosure: str = "реклама"
+    batch_budget_usd: float | None = None
+    batch_telegram_mode: str = "both"
     _base_dir: Path = field(default_factory=lambda: Path(__file__).resolve().parent, init=False, repr=False)
 
     @property
@@ -87,7 +89,7 @@ class Config:
         for key in ("dry_run", "require_image", "require_like", "advertising"):
             if not isinstance(getattr(self, key), bool):
                 raise ValueError(f"{key}: требуется true или false")
-        for key, allowed in {"publication_mode": {"manual"}, "telegram_mode": {"disabled", "verified", "draft", "published"}, "image_mode": {"none", "rotate", "specific", "task"}, "log_level": {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}}.items():
+        for key, allowed in {"publication_mode": {"manual"}, "telegram_mode": {"disabled", "verified", "draft", "published"}, "batch_telegram_mode": {"both", "any", "draft", "verified", "disabled"}, "image_mode": {"none", "rotate", "specific", "task"}, "log_level": {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}}.items():
             if not isinstance(getattr(self, key), str) or getattr(self, key) not in allowed:
                 raise ValueError(f"{key}: допустимо {', '.join(sorted(allowed))}")
         if not isinstance(self.image_order, list) or len(self.image_order) != 4 or set(self.image_order) != {1, 2, 3, 4} or any(type(x) is not int for x in self.image_order):
@@ -103,6 +105,10 @@ class Config:
                 continue
             if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value) or value < 0:
                 raise ValueError(f"{key}: требуется неотрицательное число")
+        if self.batch_budget_usd is not None:
+            value = self.batch_budget_usd
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+                raise ValueError('Лимит расходов партии должен быть конечным неотрицательным числом или пустым')
         if not isinstance(self.reward_by_image, dict):
             raise ValueError("reward_by_image: требуется словарь номер: сумма")
         for slot, value in self.reward_by_image.items():

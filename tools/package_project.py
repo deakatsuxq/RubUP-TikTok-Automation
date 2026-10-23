@@ -8,7 +8,7 @@ import zipfile
 
 def build(destination=None):
     root = Path(__file__).resolve().parents[1]
-    target = Path(destination) if destination else root.parent / 'RubUP-TikTok-Automation.zip'
+    target = Path(destination) if destination else root.parent / 'RubUP-Automation-3.0-Windows.zip'
     target.parent.mkdir(parents=True, exist_ok=True)
     names = ['README.md', 'requirements.txt', 'config.yaml', '.env.example', '.gitignore', '.gitattributes',
              'pytest.ini', 'start.bat', 'install.bat', 'setup_windows.ps1', 'build_windows.ps1',

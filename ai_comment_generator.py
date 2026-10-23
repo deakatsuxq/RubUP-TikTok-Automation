@@ -10,6 +10,8 @@ from typing import Any
 import httpx
 
 from api_client import APIClient, IntegrationError
+from budget import BudgetError
+from comment_similarity import comments_too_similar
 from validators import ValidationError, validate_comment
 
 
@@ -43,7 +45,7 @@ class CommentGenerator:
         self.http = APIClient(client, timeout=getattr(config, "timeout", 30),
                               retries=getattr(config, "retries", 2))
 
-    def generate(self, task_id: int, video: dict) -> str:
+    def generate(self, task_id: int, video: dict, budget_guard=None) -> str:
         """Generate once plus at most two repairs; persist all paid usage.
 
         Failed validation never becomes a publication or a completed task.
@@ -53,6 +55,10 @@ class CommentGenerator:
         if not getattr(self.config, "dry_run", False) and not self.api_key:
             raise IntegrationError("Не задан OPENAI_API_KEY. Укажите ключ в локальном .env")
         recent = self.db.recent_comments(limit=30, exclude_task_id=task_id)
+        # Exact SQL uniqueness remains authoritative. Lexical diversity must
+        # also cover older history, not just the short context sent to the API.
+        history = [row['comment'] for row in self.db.list_tasks()
+                   if row['id'] != task_id and row.get('comment')]
         last_error = "Некорректный ответ генератора"
         for attempt in range(1, 4):
             self.db.update_task(task_id, attempts=attempt)
@@ -60,15 +66,30 @@ class CommentGenerator:
                 candidate = self._dry_comment(video, attempt)
                 usage = None
             else:
+                context = self._context(video, recent, last_error if attempt > 1 else '')
+                output_limit = getattr(self.config, 'max_output_tokens', 120)
+                def reserve():
+                    return budget_guard.before_request(context, SYSTEM_INSTRUCTION, output_limit)
+                def settle(reservation, state, data):
+                    measured = self._usage(data or {})
+                    cost = self._usage_cost(measured) if state == 'response' else None
+                    budget_guard.settle(reservation, cost, known_rejected=state == 'rejected',
+                                        usage_known=state == 'response' and measured['known'])
                 try:
                     data = self.http.request(
                         "POST", "https://api.openai.com/v1/responses",
                         headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
                         json={"model": self.config.model, "instructions": SYSTEM_INSTRUCTION,
-                              "input": self._context(video, recent, last_error if attempt > 1 else ""),
-                              "max_output_tokens": getattr(self.config, "max_output_tokens", 120),
+                              "input": context,
+                              "max_output_tokens": output_limit,
                               "store": False},
+                        before_attempt=reserve if budget_guard is not None else None,
+                        after_attempt=settle if budget_guard is not None else None,
                     )
+                except BudgetError as exc:
+                    self._record_request_attempts(task_id, attempt)
+                    self.db.add_event(task_id, 'BUDGET_STOP', str(exc))
+                    raise
                 except IntegrationError as exc:
                     self._record_request_attempts(task_id, attempt)
                     self.db.add_event(task_id, "OPENAI_ERROR", str(exc))
@@ -85,6 +106,9 @@ class CommentGenerator:
                 )
                 if self.db.comment_exists(value, exclude_task_id=task_id):
                     raise ValidationError("Этот комментарий уже использовался")
+                if not getattr(self.config, 'dry_run', False) and any(
+                        comments_too_similar(value, previous) for previous in history):
+                    raise ValidationError('Комментарий слишком похож на сохранённый: нужна другая формулировка')
                 if _UNSUPPORTED_EXPERIENCE.search(value):
                     raise ValidationError("Комментарий содержит неподтверждённый личный опыт или благодарность")
             except ValidationError as exc:
@@ -184,20 +208,24 @@ class CommentGenerator:
         if not isinstance(usage, dict):
             return {"input_tokens": 0, "output_tokens": 0, "known": False}
         try:
-            inputs, outputs = int(usage["input_tokens"]), int(usage["output_tokens"])
-            if inputs < 0 or outputs < 0:
+            inputs, outputs = usage["input_tokens"], usage["output_tokens"]
+            if type(inputs) is not int or type(outputs) is not int or inputs < 0 or outputs < 0:
                 raise ValueError
             return {"input_tokens": inputs, "output_tokens": outputs, "known": True}
         except (KeyError, ValueError, TypeError):
             return {"input_tokens": 0, "output_tokens": 0, "known": False}
 
-    def _record_usage(self, task_id: int, usage: dict, *, success: bool, attempt: int) -> None:
+    def _usage_cost(self, usage):
         incoming = getattr(self.config, "input_price_per_million", None)
         outgoing = getattr(self.config, "output_price_per_million", None)
         cost = None
         if usage["known"] and incoming is not None and outgoing is not None:
             cost = float((Decimal(usage["input_tokens"]) * Decimal(str(incoming))
                           + Decimal(usage["output_tokens"]) * Decimal(str(outgoing))) / Decimal(1_000_000))
+        return cost
+
+    def _record_usage(self, task_id: int, usage: dict, *, success: bool, attempt: int) -> None:
+        cost = self._usage_cost(usage)
         self.db.record_usage(task_id, self.config.model, usage["input_tokens"],
                              usage["output_tokens"], cost, success, attempt)
         if not usage["known"]:
@@ -206,14 +234,21 @@ class CommentGenerator:
     def _dry_comment(self, video: dict, attempt: int) -> str:
         video_id = str(video.get("video_id", "demo"))
         marker = video_id[-12:]
+        account_id = str(video.get('account_id') or '')
+        # Real generation never uses an account/ID suffix as a substitute for
+        # distinct wording. These labels are permitted only for explicit test
+        # fixtures and keep 50x2 demonstration records unique and auditable.
+        account_marker = str(video.get('account_slot') or video.get('slot') or account_id[-6:] or '1')
         label = getattr(self.config, "disclosure", "реклама")
         prefix = f"тест: {label}, " if getattr(self.config, "advertising", True) else "тест: "
         versions = (
-            f"{prefix}RubUP — обсудим ролик {marker}?",
-            f"{prefix}что думаете о RubUP? {marker}",
-            f"{prefix}в рубапе что интересного? {marker}",
+            f"{prefix}RubUP — обсудим ролик {marker}, пример {account_marker}?",
+            f"{prefix}что думаете о RubUP? {marker}, пример {account_marker}",
+            f"{prefix}в рубапе что интересного? {marker}, пример {account_marker}",
         )
-        return versions[(attempt - 1) % len(versions)]
+        # The two profiles use different base constructions, not merely labels.
+        base = 1 if account_marker in {'2', '02'} or video.get('account_slot') == 2 else 0
+        return versions[(base + attempt - 1) % len(versions)]
 
     def test_connection(self) -> bool:
         if not self.api_key:

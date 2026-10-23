@@ -30,21 +30,27 @@ class APIClient:
         self.last_attempt_states: list[str] = []
 
     def request(self, method: str, url: str, *, retry_safe: bool = False,
+                before_attempt=None, after_attempt=None,
                 **kwargs: Any) -> dict:
         self.last_attempt_states = []
         kwargs.setdefault("timeout", self.timeout)
         kwargs.setdefault("follow_redirects", False)
         for attempt in range(self.retries + 1):
+            reservation = before_attempt() if before_attempt is not None else None
             try:
                 response = self.client.request(method, url, **kwargs)
             except httpx.HTTPError:
                 self.last_attempt_states.append("unknown")
+                if after_attempt is not None:
+                    after_attempt(reservation, 'unknown', None)
                 if retry_safe and attempt < self.retries:
                     self.sleep(min(2 ** attempt, 8))
                     continue
                 raise IntegrationError("Сетевая ошибка API; результат запроса неизвестен. Автоповтор не выполнен") from None
             if response.status_code == 429:
                 self.last_attempt_states.append("rejected")
+                if after_attempt is not None:
+                    after_attempt(reservation, 'rejected', None)
                 if attempt < self.retries:
                     wait = self._retry_delay(response, attempt)
                     self.sleep(wait)
@@ -52,18 +58,29 @@ class APIClient:
                 raise IntegrationError("API ограничил частоту запросов (429). Повторите позже")
             if 500 <= response.status_code < 600 and retry_safe and attempt < self.retries:
                 self.last_attempt_states.append("unknown")
+                if after_attempt is not None:
+                    after_attempt(reservation, 'unknown', None)
                 self.sleep(min(2 ** attempt, 8))
                 continue
             if not 200 <= response.status_code < 300:
-                self.last_attempt_states.append("rejected" if 400 <= response.status_code < 500 else "unknown")
+                state = "rejected" if 400 <= response.status_code < 500 else "unknown"
+                self.last_attempt_states.append(state)
+                if after_attempt is not None:
+                    after_attempt(reservation, state, None)
                 raise IntegrationError(f"API отклонил запрос (HTTP {response.status_code})")
             self.last_attempt_states.append("response")
             try:
                 data = response.json()
             except (ValueError, UnicodeError):
+                if after_attempt is not None:
+                    after_attempt(reservation, 'unknown', None)
                 raise IntegrationError("API вернул некорректный JSON") from None
             if not isinstance(data, dict):
+                if after_attempt is not None:
+                    after_attempt(reservation, 'unknown', None)
                 raise IntegrationError("API вернул неожиданный формат ответа")
+            if after_attempt is not None:
+                after_attempt(reservation, 'response', data)
             return data
         raise IntegrationError("Лимит попыток API исчерпан")
 

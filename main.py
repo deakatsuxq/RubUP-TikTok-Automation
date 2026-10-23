@@ -31,21 +31,25 @@ def main(argv=None):
     parser.add_argument('--config', default=str(root / 'config.yaml'))
     group = parser.add_mutually_exclusive_group()
     group.add_argument('--dry-run', action='store_true', help='Изолированная проверка без сети и ключей')
+    group.add_argument('--batch-demo', action='store_true', help='Демонстрация 50 видео и 100 черновиков без сети')
     group.add_argument('--import-file', metavar='PATH', help='Импорт TXT, CSV или JSON')
     group.add_argument('--prepare', action='store_true', help='Подготовка одного цикла; реальные API могут тарифицироваться')
     group.add_argument('--status', action='store_true', help='Локальная статистика')
     group.add_argument('--export', metavar='PATH', help='Экспорт истории CSV')
     group.add_argument('--gui-smoke', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
-    gui = not any((args.dry_run, args.import_file, args.prepare, args.status, args.export, args.gui_smoke))
+    gui = not any((args.dry_run, args.batch_demo, args.import_file, args.prepare, args.status, args.export, args.gui_smoke))
     service = None
     log = None
     try:
         from application import AppService
         from logger import configure_logging
         log = configure_logging(Path(args.config).resolve().parent / 'logs')
-        service = AppService(args.config, dry_run_override=True if args.dry_run else None)
-        if args.dry_run:
+        service = AppService(args.config, dry_run_override=True if args.dry_run or args.batch_demo else None)
+        if args.batch_demo:
+            report = service.batch.demo()
+            result = {k: v for k, v in report.items() if k != 'groups'}
+        elif args.dry_run:
             result = service.dry_run()
         elif args.import_file:
             result = service.import_file(args.import_file)
@@ -60,10 +64,10 @@ def main(argv=None):
         else:
             from PySide6.QtWidgets import QApplication
             from PySide6.QtCore import QTimer
-            from gui.main_window import MainWindow
+            from gui.batch_window import BatchWindow
             app = QApplication(sys.argv[:1])
-            app.setApplicationName('RubUP Automation')
-            window = MainWindow(service)
+            app.setApplicationName('RubUP Automation 3.0')
+            window = BatchWindow(service)
             window.show()
             if args.gui_smoke:
                 QTimer.singleShot(500, window.close)

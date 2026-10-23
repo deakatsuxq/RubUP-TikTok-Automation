@@ -18,7 +18,7 @@ class ReportTracker:
         self.db.update_task(task_id, checklist=merged)
         return self.db.get_task(task_id)
 
-    def confirm_publication(self, task_id, checklist: dict):
+    def confirm_publication(self, task_id, checklist: dict, allow_pending_like=False):
         """Record an explicit manual attestation; this does not call TikTok."""
         from validators import validate_comment
 
@@ -56,7 +56,7 @@ class ReportTracker:
         required_slot = checks.get("required_image_slot")
         if required_slot is not None and task["image_slot"] != required_slot:
             raise ValueError("Картинка не соответствует требованиям задания")
-        if checks.get("require_like") and checks.get("own_comment_liked") is not True:
+        if checks.get("require_like") and checks.get("own_comment_liked") is not True and not allow_pending_like:
             raise ValueError("Подтвердите лайк собственному комментарию")
         checks["comment_contains_rubup"] = True  # checked above, never assumed
         self.db.update_task(task_id, publication_status="PUBLISHED",

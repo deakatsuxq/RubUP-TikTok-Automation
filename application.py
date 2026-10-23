@@ -72,6 +72,14 @@ class AppService:
         self._cycle_lock = threading.Lock()
         self._process_lock = ProcessLock(str(db_path) + '.worker.lock')
         self.settings = SettingsService(self)
+        self._batch = None
+
+    @property
+    def batch(self):
+        if self._batch is None:
+            from batch_service import BatchService
+            self._batch = BatchService(self)
+        return self._batch
 
     def _begin_cycle(self):
         if not self._cycle_lock.acquire(blocking=False):
@@ -311,6 +319,8 @@ class AppService:
         task = self.db.get_task(task_id)
         if task['account_id'] != self.config.account_id or task['publication_status'] == 'PUBLISHED':
             raise ValidationError('Метаданные этой задачи защищены')
+        if any(t['video_id'] == task['video_id'] and t['publication_status'] == 'PUBLISHED' for t in self.db.list_tasks()):
+            raise ValidationError('Метаданные видео с подтверждённой публикацией защищены')
         self.search.enrich(task['video_id'])
         self.refresh()
         return self.db.get_task(task_id)
@@ -390,6 +400,8 @@ class AppService:
             raise ValidationError('Задача принадлежит другому аккаунту')
         if task['publication_status'] == 'PUBLISHED':
             raise ValidationError('Метаданные подтверждённой публикации защищены')
+        if any(t['video_id'] == task['video_id'] and t['publication_status'] == 'PUBLISHED' for t in self.db.list_tasks()):
+            raise ValidationError('Метаданные видео с подтверждённой публикацией защищены')
         from datetime import date
         if published_at:
             date.fromisoformat(published_at)
